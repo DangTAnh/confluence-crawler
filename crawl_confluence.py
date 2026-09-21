@@ -111,11 +111,11 @@ class MD(HTMLParser):
 def storage_to_md(xhtml):
     p = MD(); p.feed(xhtml or ''); p.close(); return p.result()
 
-def auth_header(email, token):
-    if email:  # Cloud API token (Basic)
-        raw = f'{email}:{token}'.encode()
+def auth_header(user, secret):
+    if user:  # Basic: Cloud (email + API token) | Server/DC (username + password)
+        raw = f'{user}:{secret}'.encode()
         return 'Basic ' + base64.b64encode(raw).decode()
-    return 'Bearer ' + token  # Server/DC PAT
+    return 'Bearer ' + secret  # Server/DC PAT (chi can token, khong can user)
 
 def api(base, path, headers, params=None, retries=5):
     url = base.rstrip('/') + path
@@ -128,8 +128,7 @@ def api(base, path, headers, params=None, retries=5):
         except urllib.error.HTTPError as e:
             if e.code in (429, 500, 502, 503, 504) and i < retries - 1:
                 time.sleep(2 ** i); continue
-            body = e.read().decode('utf-8', 'replace')[:500]
-            sys.exit(f'HTTP {e.code} {url}\n{body}\n(Kiem tra base-url/email/token & quyen doc space)')
+            sys.exit(f'HTTP {e.code} {url}\n{body}\n(Kiem tra base-url/user/token & quyen doc space)')
         except urllib.error.URLError as e:
             sys.exit(f'Network error: {e}\nURL: {url}')
 
@@ -151,9 +150,8 @@ def selftest():
 def main():
     import urllib.error
     ap = argparse.ArgumentParser(description='Crawl Confluence -> tree .md (stdlib only)')
-    ap.add_argument('--base-url', default=os.environ.get('CONFLUENCE_BASE_URL', ''), help='vd https://site.atlassian.net/wiki')
-    ap.add_argument('--email', default=os.environ.get('CONFLUENCE_EMAIL', ''))
-    ap.add_argument('--token', default=os.environ.get('CONFLUENCE_API_TOKEN') or os.environ.get('CONFLUENCE_TOKEN', ''))
+    ap.add_argument('--email', '--user', dest='user', default=os.environ.get('CONFLUENCE_EMAIL') or os.environ.get('CONFLUENCE_USER', ''), help='Cloud: email | Server/DC: username (co the bo trong neu dung PAT)')
+    ap.add_argument('--token', '--password', dest='token', default=os.environ.get('CONFLUENCE_API_TOKEN') or os.environ.get('CONFLUENCE_TOKEN') or os.environ.get('CONFLUENCE_PASSWORD', ''), help='Cloud: API token | Server/DC: password hoac PAT')
     ap.add_argument('--space', default=os.environ.get('CONFLUENCE_SPACES', ''), help='LOC nhau boi dau phay, mac dinh: tat ca')
     ap.add_argument('-o', '--output', default=os.environ.get('CONFLUENCE_OUTPUT', 'confluence_export'))
     ap.add_argument('--attachments', action='store_true', help='tai kem file dinh kem')
@@ -161,7 +159,7 @@ def main():
     a = ap.parse_args()
     if a.selftest: return selftest()
     if not a.base_url or not a.token: sys.exit('Thieu --base-url / --token (hoac env CONFLUENCE_BASE_URL, CONFLUENCE_API_TOKEN)')
-    H = {'Authorization': auth_header(a.email, a.token), 'Accept': 'application/json'}
+    H = {'Authorization': auth_header(a.user, a.token), 'Accept': 'application/json'}
 
     spaces = [s.strip() for s in a.space.split(',') if s.strip()] or \
              [s['key'] for s in paged(a.base_url, '/rest/api/space', H, {'limit': 50, 'type': 'global'})]
