@@ -7,7 +7,7 @@ Usage:
   python crawl_confluence.py --space DEV,DOC   (optional filter, default: all spaces)
   python crawl_confluence.py --base-url https://x.atlassian.net --email a@b.c --token xyz -o out
   python crawl_confluence.py --selftest   (offline check, no network)
-Output:  out/<SPACE_KEY>/<Parent>/<Page>.md  +  out/<SPACE_KEY>/TREE.md
+Output:  out/<SPACE_KEY>/<ancestor-id>/.../<page-id>/{content.md,metadata.json}  +  out/<SPACE_KEY>/TREE.md
 # ponytail: naive storage-XHTML->md (no tables-nested/macros fidelity); swap in html2text/mistune if needed.
 """
 import argparse, base64, html, json, os, re, sys, time, urllib.parse, urllib.request
@@ -159,6 +159,9 @@ def selftest():
     md = storage_to_md('<h1>T</h1><p>Hello <strong>w</strong> <a href="https://x">l</a></p><ul><li>a</li></ul><table><tr><th>H</th></tr><tr><td>v</td></tr></table><pre>print(1)</pre>')
     for s in ('# T', '**w**', '[l](https://x)', '- a', '| **H** |', '```'):
         assert s in md, f'missing {s} in:\n{md}'
+    fake = {'id': '123', 'title': 'T', 'version': {'number': 2}, 'body': {'storage': {'value': '<p>x</p>'}}}
+    meta = dict(fake); meta['_export'] = {'space': 'DOC', 'url': 'http://x/pages/123', 'path': '1/123'}
+    assert '"number": 2' in json.dumps(meta, ensure_ascii=False, indent=2) and 'pages/123' in json.dumps(meta)
     print('selftest OK')
 
 def main():
@@ -183,7 +186,7 @@ def main():
     for sk in spaces:
         pages = list(paged(a.base_url, '/rest/api/content', H,
             {'spaceKey': sk, 'type': 'page', 'status': 'current',
-             'expand': 'ancestors,version,body.storage', 'limit': 50, 'orderBy': 'id'}))
+             'expand': 'ancestors,children.page,children.attachment,descendants.page,space,version,history,metadata.labels,body.storage', 'limit': 50, 'orderBy': 'id'}))
         by_id = {p['id']: p for p in pages}
         # path tu ancestors (chi dung title, sort id tang dan = root->leaf)
         def chain(p):
@@ -192,19 +195,19 @@ def main():
         root = os.path.join(a.output, sanitize(sk)); os.makedirs(fs(root), exist_ok=True)
         tree_lines = [f'# {sk} ({len(pages)} pages)', '']
         for p in sorted(pages, key=lambda x: int(x['id'])):
-            segs = [f"{sanitize(t['title'])}_{t['id']}" for t in chain(p)]  # ngan + duy nhat; title day du nam trong frontmatter/TREE
-            dirs = [root] + segs[:-1]
-            d = os.path.join(*dirs); os.makedirs(fs(d), exist_ok=True)
-            fname = f"{segs[-1]}.md"
-            fpath = os.path.join(d, fname)
-            v = p.get('version', {})
+            ids = [t['id'] for t in chain(p)]  # cay thu muc chi bang id
+            d = os.path.join(root, *ids); os.makedirs(fs(d), exist_ok=True)
             url = a.base_url.rstrip('/') + '/pages/' + p['id']
+            meta = dict(p)
+            meta['_export'] = {'space': sk, 'url': url, 'path': '/'.join(ids),
+                               'crawled_at': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}
+            with open(fs(os.path.join(d, 'metadata.json')), 'w', encoding='utf-8') as f:
+                json.dump(meta, f, ensure_ascii=False, indent=2)
             body = storage_to_md((p.get('body') or {}).get('storage', {}).get('value', ''))
-            with open(fs(fpath), 'w', encoding='utf-8') as f:
-                f.write(f"---\nid: {p['id']}\ntitle: {json.dumps(p['title'], ensure_ascii=False)}\n"
-                        f"space: {sk}\nversion: {v.get('number')} \nupdated: {v.get('when')}\nurl: {url}\n---\n\n# {p['title']}\n\n{body}")
-            depth = len(segs) - 1
-            tree_lines.append(f"{'  ' * depth}- [{p['title']}]({'/'.join(segs[:-1] + [fname]).replace(' ', '%20')})")
+            with open(fs(os.path.join(d, 'content.md')), 'w', encoding='utf-8') as f:
+                f.write(f"---\nid: {p['id']}\ntitle: {json.dumps(p['title'], ensure_ascii=False)}\nurl: {url}\n---\n\n# {p['title']}\n\n{body}")
+            depth = len(ids) - 1
+            tree_lines.append(f"{'  ' * depth}- [{p['title']}]({'/'.join(ids + ['content.md'])})")
             if a.attachments:
                 att_dir = os.path.join(d, '_attachments'); os.makedirs(fs(att_dir), exist_ok=True)
                 for at in paged(a.base_url, f"/rest/api/content/{p['id']}/child/attachment", H, {'limit': 50}):
