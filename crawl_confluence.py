@@ -127,25 +127,32 @@ def auth_header(user, secret):
         return 'Basic ' + base64.b64encode(raw).decode()
     return 'Bearer ' + secret  # Server/DC PAT (chi can token, khong can user)
 
-def api(base, path, headers, params=None, retries=5):
+def api(base, path, headers, params=None, retries=5, timeout=30):
     url = base.rstrip('/') + path
     if params: url += '?' + urllib.parse.urlencode(params)
     for i in range(retries):
         r = urllib.request.Request(url, headers=headers)
         try:
-            with urllib.request.urlopen(r, timeout=60) as h:
+            with urllib.request.urlopen(r, timeout=timeout) as h:
                 return json.load(h)
         except urllib.error.HTTPError as e:
             if e.code in (429, 500, 502, 503, 504) and i < retries - 1:
                 time.sleep(2 ** i); continue
             sys.exit(f'HTTP {e.code} {url}\n{body}\n(Kiem tra base-url/user/token & quyen doc space)')
         except urllib.error.URLError as e:
-            sys.exit(f'Network error: {e}\nURL: {url}')
+            if i < retries - 1:
+                time.sleep(2 ** i); continue
+            sys.exit(f'Network error: {e}\nURL: {url}\n'
+                     f'(Khong noi duoc toi server — loi mang, chua lien quan auth:\n'
+                     f' 1) Mo thu {base}/status tren browser CUNG MAY (phai tra {{"state":"RUNNING"}})\n'
+                     f' 2) Dung IP/port + context-path (/confluence, /wiki) nhu tren browser\n'
+                     f' 3) VPN/mang noi bo, firewall, http vs https\n'
+                     f' 4) Thu: curl -v {base}/status | Test-NetConnection -ComputerName <ip> -Port <port>)')
 
-def paged(base, path, headers, params, key='results'):
+def paged(base, path, headers, params, key='results', timeout=30):
     start = 0; limit = int(params.pop('limit', 50))
     while True:
-        d = api(base, path, headers, {**params, 'start': start, 'limit': limit})
+        d = api(base, path, headers, {**params, 'start': start, 'limit': limit}, timeout=timeout)
         items = d.get(key, [])
         for it in items: yield it
         if len(items) < limit: break
@@ -173,6 +180,7 @@ def main():
     ap.add_argument('--space', default=os.environ.get('CONFLUENCE_SPACES', ''), help='LOC nhau boi dau phay, mac dinh: tat ca')
     ap.add_argument('-o', '--output', default=os.environ.get('CONFLUENCE_OUTPUT', 'confluence_export'))
     ap.add_argument('--attachments', action='store_true', help='tai kem file dinh kem')
+    ap.add_argument('--timeout', type=int, default=int(os.environ.get('CONFLUENCE_TIMEOUT', '30')), help='timeout giay moi request (default 30)')
     ap.add_argument('--selftest', action='store_true')
     a = ap.parse_args()
     if a.selftest: return selftest()
@@ -180,13 +188,13 @@ def main():
     H = {'Authorization': auth_header(a.user, a.token), 'Accept': 'application/json'}
 
     spaces = [s.strip() for s in a.space.split(',') if s.strip()] or \
-             [s['key'] for s in paged(a.base_url, '/rest/api/space', H, {'limit': 50, 'type': 'global'})]
+             [s['key'] for s in paged(a.base_url, '/rest/api/space', H, {'limit': 50, 'type': 'global'}, timeout=a.timeout)]
     print(f'{len(spaces)} spaces: {", ".join(spaces)}')
 
     for sk in spaces:
         pages = list(paged(a.base_url, '/rest/api/content', H,
             {'spaceKey': sk, 'type': 'page', 'status': 'current',
-             'expand': 'ancestors,children.page,children.attachment,descendants.page,space,version,history,metadata.labels,body.storage', 'limit': 50, 'orderBy': 'id'}))
+             'expand': 'ancestors,children.page,children.attachment,descendants.page,space,version,history,metadata.labels,body.storage', 'limit': 50, 'orderBy': 'id'}, timeout=a.timeout))
         by_id = {p['id']: p for p in pages}
         # path tu ancestors (chi dung title, sort id tang dan = root->leaf)
         def chain(p):
@@ -210,7 +218,7 @@ def main():
             tree_lines.append(f"{'  ' * depth}- [{p['title']}]({'/'.join(ids + ['content.md'])})")
             if a.attachments:
                 att_dir = os.path.join(d, '_attachments'); os.makedirs(fs(att_dir), exist_ok=True)
-                for at in paged(a.base_url, f"/rest/api/content/{p['id']}/child/attachment", H, {'limit': 50}):
+                for at in paged(a.base_url, f"/rest/api/content/{p['id']}/child/attachment", H, {'limit': 50}, timeout=a.timeout):
                     dl = (at.get('_links') or {}).get('download', '')
                     if not dl: continue
                     dest = os.path.join(att_dir, sanitize(at.get('title', 'file')))
