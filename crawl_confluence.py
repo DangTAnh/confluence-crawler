@@ -150,6 +150,7 @@ def selftest():
 def main():
     import urllib.error
     ap = argparse.ArgumentParser(description='Crawl Confluence -> tree .md (stdlib only)')
+    ap.add_argument('--base-url', default=os.environ.get('CONFLUENCE_BASE_URL', ''), help='vd https://site.atlassian.net/wiki')
     ap.add_argument('--email', '--user', dest='user', default=os.environ.get('CONFLUENCE_EMAIL') or os.environ.get('CONFLUENCE_USER', ''), help='Cloud: email | Server/DC: username (co the bo trong neu dung PAT)')
     ap.add_argument('--token', '--password', dest='token', default=os.environ.get('CONFLUENCE_API_TOKEN') or os.environ.get('CONFLUENCE_TOKEN') or os.environ.get('CONFLUENCE_PASSWORD', ''), help='Cloud: API token | Server/DC: password hoac PAT')
     ap.add_argument('--space', default=os.environ.get('CONFLUENCE_SPACES', ''), help='LOC nhau boi dau phay, mac dinh: tat ca')
