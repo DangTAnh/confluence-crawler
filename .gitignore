@@ -1,3 +1,5 @@
 __pycache__/
 *.pyc
 confluence_export/
+data/
+.tmp_*/
