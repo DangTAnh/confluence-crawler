@@ -13,13 +13,23 @@ Output:  out/<SPACE_KEY>/<Parent>/<Page>.md  +  out/<SPACE_KEY>/TREE.md
 import argparse, base64, html, json, os, re, sys, time, urllib.parse, urllib.request
 from html.parser import HTMLParser
 
+SEG_MAX = 50
+WIN_RESERVED = {'CON', 'PRN', 'AUX', 'NUL'} | {f'COM{i}' for i in range(1, 10)} | {f'LPT{i}' for i in range(1, 10)}
 SANITIZE_RE = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 WS_RE = re.compile(r'\s+')
-
-def sanitize(name, maxlen=80):
+def sanitize(name, maxlen=SEG_MAX):
     name = html.unescape(WS_RE.sub(' ', name or 'untitled')).strip().strip('.')
     name = SANITIZE_RE.sub('_', name).strip()
-    return (name[:maxlen] or 'untitled')
+    name = (name[:maxlen] or 'untitled').strip().rstrip('.')
+    if name.upper() in WIN_RESERVED:
+        name += '_'
+    return name or 'untitled'
+def fs(path):
+    # Windows MAX_PATH bypass (\\?\ prefix); no-op elsewhere.
+    if os.name == 'nt':
+        ap = os.path.abspath(path)
+        return ap if ap.startswith('\\\\?\\') else '\\\\?\\' + ap
+    return path
 
 class MD(HTMLParser):
     """Minimal storage-XHTML -> markdown. Unknown ac:* macros degrade to inner text."""
@@ -143,9 +153,13 @@ def paged(base, path, headers, params, key='results'):
 
 def selftest():
     assert sanitize('a/b:c*?') == 'a_b_c__', sanitize('  ')
+    assert sanitize('CON') == 'CON_' and len(sanitize('x' * 99)) <= SEG_MAX
+    assert not sanitize('y' * 60 + '. .').endswith(('.', ' '))
+    assert (os.name != 'nt') or fs('out').startswith('\\\\?\\')
     md = storage_to_md('<h1>T</h1><p>Hello <strong>w</strong> <a href="https://x">l</a></p><ul><li>a</li></ul><table><tr><th>H</th></tr><tr><td>v</td></tr></table><pre>print(1)</pre>')
     for s in ('# T', '**w**', '[l](https://x)', '- a', '| **H** |', '```'):
         assert s in md, f'missing {s} in:\n{md}'
+    print('selftest OK')
 
 def main():
     import urllib.error
@@ -175,33 +189,33 @@ def main():
         def chain(p):
             anc = sorted([x for x in p.get('ancestors', []) if x['id'] in by_id], key=lambda x: int(x['id']))
             return anc + [p]
-        root = os.path.join(a.output, sanitize(sk)); os.makedirs(root, exist_ok=True)
+        root = os.path.join(a.output, sanitize(sk)); os.makedirs(fs(root), exist_ok=True)
         tree_lines = [f'# {sk} ({len(pages)} pages)', '']
         for p in sorted(pages, key=lambda x: int(x['id'])):
-            titles = [sanitize(t['title']) for t in chain(p)]
-            dirs = [root] + titles[:-1]
-            d = os.path.join(*dirs); os.makedirs(d, exist_ok=True)
-            fname = f"{titles[-1]}_{p['id']}.md"
+            segs = [f"{sanitize(t['title'])}_{t['id']}" for t in chain(p)]  # ngan + duy nhat; title day du nam trong frontmatter/TREE
+            dirs = [root] + segs[:-1]
+            d = os.path.join(*dirs); os.makedirs(fs(d), exist_ok=True)
+            fname = f"{segs[-1]}.md"
             fpath = os.path.join(d, fname)
             v = p.get('version', {})
             url = a.base_url.rstrip('/') + '/pages/' + p['id']
             body = storage_to_md((p.get('body') or {}).get('storage', {}).get('value', ''))
-            with open(fpath, 'w', encoding='utf-8') as f:
+            with open(fs(fpath), 'w', encoding='utf-8') as f:
                 f.write(f"---\nid: {p['id']}\ntitle: {json.dumps(p['title'], ensure_ascii=False)}\n"
                         f"space: {sk}\nversion: {v.get('number')} \nupdated: {v.get('when')}\nurl: {url}\n---\n\n# {p['title']}\n\n{body}")
-            depth = len(titles) - 1
-            tree_lines.append(f"{'  ' * depth}- [{p['title']}]({'/'.join(titles[:-1] + [fname]).replace(' ', '%20')})")
+            depth = len(segs) - 1
+            tree_lines.append(f"{'  ' * depth}- [{p['title']}]({'/'.join(segs[:-1] + [fname]).replace(' ', '%20')})")
             if a.attachments:
-                att_dir = os.path.join(d, '_attachments'); os.makedirs(att_dir, exist_ok=True)
+                att_dir = os.path.join(d, '_attachments'); os.makedirs(fs(att_dir), exist_ok=True)
                 for at in paged(a.base_url, f"/rest/api/content/{p['id']}/child/attachment", H, {'limit': 50}):
                     dl = (at.get('_links') or {}).get('download', '')
                     if not dl: continue
                     dest = os.path.join(att_dir, sanitize(at.get('title', 'file')))
-                    if os.path.exists(dest): continue
+                    if os.path.exists(fs(dest)): continue
                     r = urllib.request.Request(a.base_url.rstrip('/') + dl, headers=H)
-                    with urllib.request.urlopen(r, timeout=120) as h, open(dest, 'wb') as f:
+                    with urllib.request.urlopen(r, timeout=120) as h, open(fs(dest), 'wb') as f:
                         f.write(h.read())
-        with open(os.path.join(root, 'TREE.md'), 'w', encoding='utf-8') as f:
+        with open(fs(os.path.join(root, 'TREE.md')), 'w', encoding='utf-8') as f:
             f.write('\n'.join(tree_lines) + '\n')
         print(f'[{sk}] {len(pages)} pages -> {root}')
 
