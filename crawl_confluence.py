@@ -17,6 +17,10 @@ SEG_MAX = 50
 WIN_RESERVED = {'CON', 'PRN', 'AUX', 'NUL'} | {f'COM{i}' for i in range(1, 10)} | {f'LPT{i}' for i in range(1, 10)}
 SANITIZE_RE = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 WS_RE = re.compile(r'\s+')
+EXPAND = 'ancestors,children.page,children.attachment,space,version,history,metadata.labels,body.storage'
+def cql_since(space, since):
+    # Poll incremental: chi page sua sau moc `since` ("yyyy/MM/dd HH:mm"). Khong can quyen admin.
+    return f'type=page AND space="{space}" AND lastModified>"{since}" order by lastModified desc'
 def sanitize(name, maxlen=SEG_MAX):
     name = html.unescape(WS_RE.sub(' ', name or 'untitled')).strip().strip('.')
     name = SANITIZE_RE.sub('_', name).strip()
@@ -169,6 +173,7 @@ def selftest():
     fake = {'id': '123', 'title': 'T', 'version': {'number': 2}, 'body': {'storage': {'value': '<p>x</p>'}}}
     meta = dict(fake); meta['_export'] = {'space': 'DOC', 'url': 'http://x/pages/123', 'path': '1/123'}
     assert '"number": 2' in json.dumps(meta, ensure_ascii=False, indent=2) and 'pages/123' in json.dumps(meta)
+    assert cql_since('DKB', '2026/09/21 00:00') == 'type=page AND space="DKB" AND lastModified>"2026/09/21 00:00" order by lastModified desc'
     print('selftest OK')
 
 def main():
@@ -180,7 +185,7 @@ def main():
     ap.add_argument('--space', default=os.environ.get('CONFLUENCE_SPACES', ''), help='LOC nhau boi dau phay, mac dinh: tat ca')
     ap.add_argument('-o', '--output', default=os.environ.get('CONFLUENCE_OUTPUT', 'confluence_export'))
     ap.add_argument('--attachments', action='store_true', help='tai kem file dinh kem')
-    ap.add_argument('--resume', action='store_true', help='bo qua page da co san metadata.json + content.md (chay tiep khi dut giua chung)')
+    ap.add_argument('--since', default=os.environ.get('CONFLUENCE_SINCE', ''), help='chi lay page sua sau moc nay, vd "2026/09/21 00:00" (poll incremental, khong can admin)')
     ap.add_argument('--selftest', action='store_true')
     a = ap.parse_args()
     if a.selftest: return selftest()
@@ -192,9 +197,13 @@ def main():
     print(f'{len(spaces)} spaces: {", ".join(spaces)}')
 
     for sk in spaces:
-        pages = list(paged(a.base_url, '/rest/api/content', H,
-            {'spaceKey': sk, 'type': 'page', 'status': 'current',
-             'expand': 'ancestors,children.page,children.attachment,space,version,history,metadata.labels,body.storage', 'limit': 50, 'orderBy': 'id'}, timeout=a.timeout))
+        if a.since:  # poll incremental qua CQL search — user thuong chay duoc, khong can admin
+            pages = list(paged(a.base_url, '/rest/api/content/search', H,
+                {'cql': cql_since(sk, a.since), 'expand': EXPAND, 'limit': 50}, timeout=a.timeout))
+        else:
+            pages = list(paged(a.base_url, '/rest/api/content', H,
+                {'spaceKey': sk, 'type': 'page', 'status': 'current',
+                 'expand': EXPAND, 'limit': 50, 'orderBy': 'id'}, timeout=a.timeout))
         by_id = {p['id']: p for p in pages}
         # path tu ancestors (chi dung title, sort id tang dan = root->leaf)
         def chain(p):
