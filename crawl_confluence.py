@@ -142,6 +142,7 @@ def api(base, path, headers, params=None, retries=5, timeout=30):
         except urllib.error.HTTPError as e:
             if e.code in (429, 500, 502, 503, 504) and i < retries - 1:
                 time.sleep(2 ** i); continue
+            body = e.read().decode('utf-8', 'replace')[:500]
             sys.exit(f'HTTP {e.code} {url}\n{body}\n(Kiem tra base-url/user/token & quyen doc space)')
         except urllib.error.URLError as e:
             if i < retries - 1:
