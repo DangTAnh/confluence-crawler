@@ -180,7 +180,7 @@ def main():
     ap.add_argument('--space', default=os.environ.get('CONFLUENCE_SPACES', ''), help='LOC nhau boi dau phay, mac dinh: tat ca')
     ap.add_argument('-o', '--output', default=os.environ.get('CONFLUENCE_OUTPUT', 'confluence_export'))
     ap.add_argument('--attachments', action='store_true', help='tai kem file dinh kem')
-    ap.add_argument('--timeout', type=int, default=int(os.environ.get('CONFLUENCE_TIMEOUT', '30')), help='timeout giay moi request (default 30)')
+    ap.add_argument('--resume', action='store_true', help='bo qua page da co san metadata.json + content.md (chay tiep khi dut giua chung)')
     ap.add_argument('--selftest', action='store_true')
     a = ap.parse_args()
     if a.selftest: return selftest()
@@ -194,7 +194,7 @@ def main():
     for sk in spaces:
         pages = list(paged(a.base_url, '/rest/api/content', H,
             {'spaceKey': sk, 'type': 'page', 'status': 'current',
-             'expand': 'ancestors,children.page,children.attachment,descendants.page,space,version,history,metadata.labels,body.storage', 'limit': 50, 'orderBy': 'id'}, timeout=a.timeout))
+             'expand': 'ancestors,children.page,children.attachment,space,version,history,metadata.labels,body.storage', 'limit': 50, 'orderBy': 'id'}, timeout=a.timeout))
         by_id = {p['id']: p for p in pages}
         # path tu ancestors (chi dung title, sort id tang dan = root->leaf)
         def chain(p):
@@ -202,21 +202,27 @@ def main():
             return anc + [p]
         root = os.path.join(a.output, sanitize(sk)); os.makedirs(fs(root), exist_ok=True)
         tree_lines = [f'# {sk} ({len(pages)} pages)', '']
-        for p in sorted(pages, key=lambda x: int(x['id'])):
+        print(f'[{sk}] fetched {len(pages)} pages, writing...', flush=True)
+        for n, p in enumerate(sorted(pages, key=lambda x: int(x['id'])), 1):
             ids = [t['id'] for t in chain(p)]  # cay thu muc chi bang id
             d = os.path.join(root, *ids); os.makedirs(fs(d), exist_ok=True)
             url = a.base_url.rstrip('/') + '/pages/' + p['id']
-            meta = dict(p)
-            meta['_export'] = {'space': sk, 'url': url, 'path': '/'.join(ids),
-                               'crawled_at': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}
-            with open(fs(os.path.join(d, 'metadata.json')), 'w', encoding='utf-8') as f:
-                json.dump(meta, f, ensure_ascii=False, indent=2)
-            body = storage_to_md((p.get('body') or {}).get('storage', {}).get('value', ''))
-            with open(fs(os.path.join(d, 'content.md')), 'w', encoding='utf-8') as f:
-                f.write(f"---\nid: {p['id']}\ntitle: {json.dumps(p['title'], ensure_ascii=False)}\nurl: {url}\n---\n\n# {p['title']}\n\n{body}")
             depth = len(ids) - 1
             tree_lines.append(f"{'  ' * depth}- [{p['title']}]({'/'.join(ids + ['content.md'])})")
-            if a.attachments:
+            mfile, cfile = os.path.join(d, 'metadata.json'), os.path.join(d, 'content.md')
+            skipped = a.resume and os.path.exists(fs(mfile)) and os.path.exists(fs(cfile))
+            if not skipped:  # da crawl roi thi chi ghi TREE
+                meta = dict(p)
+                meta['_export'] = {'space': sk, 'url': url, 'path': '/'.join(ids),
+                                   'crawled_at': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}
+                with open(fs(mfile), 'w', encoding='utf-8') as f:
+                    json.dump(meta, f, ensure_ascii=False, indent=2)
+                body = storage_to_md((p.get('body') or {}).get('storage', {}).get('value', ''))
+                with open(fs(cfile), 'w', encoding='utf-8') as f:
+                    f.write(f"---\nid: {p['id']}\ntitle: {json.dumps(p['title'], ensure_ascii=False)}\nurl: {url}\n---\n\n# {p['title']}\n\n{body}")
+            if n % 100 == 0 or n == len(pages):
+                print(f'[{sk}] {n}/{len(pages)}', flush=True)
+            if a.attachments and not skipped:
                 att_dir = os.path.join(d, '_attachments'); os.makedirs(fs(att_dir), exist_ok=True)
                 for at in paged(a.base_url, f"/rest/api/content/{p['id']}/child/attachment", H, {'limit': 50}, timeout=a.timeout):
                     dl = (at.get('_links') or {}).get('download', '')
