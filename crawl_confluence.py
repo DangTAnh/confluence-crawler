@@ -186,6 +186,8 @@ def main():
     ap.add_argument('--space', default=os.environ.get('CONFLUENCE_SPACES', ''), help='LOC nhau boi dau phay, mac dinh: tat ca')
     ap.add_argument('-o', '--output', default=os.environ.get('CONFLUENCE_OUTPUT', 'confluence_export'))
     ap.add_argument('--attachments', action='store_true', help='tai kem file dinh kem')
+    ap.add_argument('--resume', action='store_true', help='bo qua page da co san metadata.json + content.md')
+    ap.add_argument('--timeout', type=int, default=int(os.environ.get('CONFLUENCE_TIMEOUT', '30')), help='timeout giay moi request (default 30)')
     ap.add_argument('--since', default=os.environ.get('CONFLUENCE_SINCE', ''), help='chi lay page sua sau moc nay, vd "2026/09/21 00:00" (poll incremental, khong can admin)')
     ap.add_argument('--selftest', action='store_true')
     a = ap.parse_args()
