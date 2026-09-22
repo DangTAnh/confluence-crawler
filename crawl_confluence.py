@@ -10,7 +10,7 @@ Usage:
 Output:  out/<SPACE_KEY>/<ancestor-id>/.../<page-id>/{content.md,metadata.json}  +  out/<SPACE_KEY>/TREE.md
 # ponytail: naive storage-XHTML->md (no tables-nested/macros fidelity); swap in html2text/mistune if needed.
 """
-import argparse, base64, html, json, os, re, sys, time, urllib.parse, urllib.request
+import argparse, base64, datetime, html, json, os, re, sys, time, urllib.parse, urllib.request
 from html.parser import HTMLParser
 
 SEG_MAX = 50
@@ -18,9 +18,18 @@ WIN_RESERVED = {'CON', 'PRN', 'AUX', 'NUL'} | {f'COM{i}' for i in range(1, 10)} 
 SANITIZE_RE = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 WS_RE = re.compile(r'\s+')
 EXPAND = 'ancestors,children.page,children.attachment,space,version,history,metadata.labels,body.storage'
+_CQL_FMTS = ('%Y/%m/%d %H:%M', '%Y-%m-%dT%H:%M:%SZ', '%Y-%m-%dT%H:%M:%S', '%Y-%m-%d %H:%M:%S',
+             '%Y-%m-%d %H:%M', '%Y-%m-%d')
 def cql_since(space, since):
-    # Poll incremental: chi page sua sau moc `since` ("yyyy/MM/dd HH:mm"). Khong can quyen admin.
-    return f'type=page AND space="{space}" AND lastModified>"{since}" order by lastModified desc'
+    # Poll incremental. Chuan hoa moi dang date ve CQL "yyyy/MM/dd HH:mm"; input la thi giu nguyen.
+    s = str(since).strip().strip('"')
+    for fmt in _CQL_FMTS:
+        try:
+            s = datetime.datetime.strptime(s, fmt).strftime('%Y/%m/%d %H:%M')
+            break
+        except ValueError:
+            continue
+    return f'type=page AND space="{space}" AND lastModified>"{s}" order by lastModified desc'
 def sanitize(name, maxlen=SEG_MAX):
     name = html.unescape(WS_RE.sub(' ', name or 'untitled')).strip().strip('.')
     name = SANITIZE_RE.sub('_', name).strip()
@@ -175,6 +184,7 @@ def selftest():
     meta = dict(fake); meta['_export'] = {'space': 'DOC', 'url': 'http://x/pages/123', 'path': '1/123'}
     assert '"number": 2' in json.dumps(meta, ensure_ascii=False, indent=2) and 'pages/123' in json.dumps(meta)
     assert cql_since('DKB', '2026/09/21 00:00') == 'type=page AND space="DKB" AND lastModified>"2026/09/21 00:00" order by lastModified desc'
+    assert cql_since('DKB', '2026-09-22T04:11:18Z') == 'type=page AND space="DKB" AND lastModified>"2026/09/22 04:11" order by lastModified desc'
     print('selftest OK')
 
 def main():
