@@ -1,10 +1,14 @@
 """HTTP surface: JSON APIs (``/v1/*``) + SSR dashboard (``/``). Stdlib only.
 
-APIs (ra/w vào cho pipeline RAG sau này đọc):
-  GET  /healthz | GET /v1/status | POST /v1/sync | GET /v1/sync/runs[/{id}]
-  GET  /v1/spaces | GET /v1/pages?space=&q= | GET /v1/pages/{space}/{id}
-Dashboard: / (spaces + trigger), /runs, /runs/{id} (auto-refresh khi running),
-  /spaces/{key}/pages (search + table). CSS inline, 1 fetch() call cho nút Sync.
+APIs:
+  GET  /healthz | GET /v1/status
+  POST /v1/sync {spaces[], since?} -> {run_ids}              (manual/backfill)
+  POST /v1/events?key= {space, page_id, event} -> {run_id}   (Confluence Automation/webhook)
+  GET  /v1/sync/runs[/{id}] | GET /v1/spaces
+  GET  /v1/pages?space=&q= | GET /v1/pages/{space}/{id}
+  POST /v1/retrieve {query, top_k, space?} -> chunks+citations (RAG reads this)
+Dashboard: / (spaces + trigger), /runs, /runs/{id} (auto-refresh when active),
+  /spaces/{key}/pages (search + index status).
 """
 from __future__ import annotations
 
@@ -34,12 +38,13 @@ def _layout(title: str, body: str) -> bytes:
 class _Ctx:
     """Shared handles injected into every request handler."""
 
-    def __init__(self, settings, db, sync, pages, scheduler) -> None:
+    def __init__(self, settings, db, sync, pages, events, ingest) -> None:
         self.s = settings
         self.db = db
         self.sync = sync
         self.pages = pages
-        self.scheduler = scheduler
+        self.events = events
+        self.ingest = ingest
 
 
 def _dashboard_index(ctx: _Ctx) -> bytes:
@@ -54,6 +59,8 @@ def _dashboard_index(ctx: _Ctx) -> bytes:
           'location.href="/runs"}</script>')
     return _layout('spaces', '<table><tr><th>space</th><th>pages</th><th>last sync</th>'
                    '<th>last status</th><th></th></tr>' + rows + '</table>' + js)
+
+
 def _dashboard_runs(ctx: _Ctx, space: str = '') -> bytes:
     runs = ctx.db.list_runs(space)
     if not runs:
@@ -72,7 +79,9 @@ def _dashboard_run(ctx: _Ctx, run_id: int) -> bytes:
     if not r:
         return _layout('not found', '<p class="bad">run not found</p>')
     refresh = '<meta http-equiv="refresh" content="2">' if r.status in ('queued', 'running') else ''
+    extra = f'<p>event {_esc(r.since)}</p>' if r.mode == 'event' else ''
     body = (f'<p>space <b>{_esc(r.space)}</b> mode {_esc(r.mode)} status <b>{_esc(r.status)}</b></p>'
+            + extra +
             f'<p>fetched {r.fetched} written {r.written} skipped {r.skipped}</p>'
             + (f'<pre class="bad">{_esc(r.error)}</pre>' if r.error else ''))
     page = _layout(f'run {r.id}', body)
@@ -83,13 +92,14 @@ def _dashboard_pages(ctx: _Ctx, space: str, q: str) -> bytes:
     items = ctx.pages.list_pages(space, q)
     rows = ''.join(
         f'<tr><td>{_esc(p["id"])}</td><td>{_esc(p["title"])}</td>'
-        f'<td>{p["version"]}</td><td class="mut">{_esc(p["updated"])}</td></tr>'
+        f'<td>{p["version"]}</td><td>{_esc(p["index"])}</td>'
+        f'<td class="mut">{_esc(p["updated"])}</td></tr>'
         for p in items[:500])
     form = (f'<form method="get"><input name="q" value="{_esc(q)}" placeholder="search title">'
             f'<button>search</button></form>')
     note = '' if len(items) <= 500 else f'<p class="mut">showing 500/{len(items)}</p>'
     return _layout(f'{space} pages ({len(items)})', f'{form}{note}<table><tr><th>id</th>'
-                   f'<th>title</th><th>v</th><th>updated</th></tr>{rows}</table>')
+                   f'<th>title</th><th>v</th><th>index</th><th>updated</th></tr>{rows}</table>')
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -135,7 +145,7 @@ class _Handler(BaseHTTPRequestHandler):
             return self._json({'ok': True})
         if path == '/v1/status':
             return self._json({
-                'scheduler': {'enabled': ctx.s.scheduler_enabled, 'interval_min': ctx.s.interval_min},
+                'events': {'workers': ctx.s.event_workers, 'queued': ctx.events.depth()},
                 'spaces': ctx.pages.list_spaces()})
         if path == '/v1/sync/runs':
             return self._json([asdict(r) for r in ctx.db.list_runs(q.get('space', [''])[0],
@@ -163,14 +173,41 @@ class _Handler(BaseHTTPRequestHandler):
         return self._json({'error': 'not found'}, 404)
 
     def do_POST(self) -> None:
-        ctx = self.ctx
-        if urlparse(self.path).path == '/v1/sync':
+        ctx, q = self.ctx, parse_qs(urlparse(self.path).query)
+        path = urlparse(self.path).path
+        if path == '/v1/sync':
             body = self._body()
             spaces = body.get('spaces') or [s['key'] for s in ctx.pages.list_spaces()] \
                 or list(ctx.s.spaces)
             since = str(body.get('since') or '')
             ids = ctx.sync.start_sync([str(s) for s in spaces], since)
             return self._json({'run_ids': ids}, 202)
+        if path == '/v1/events':
+            if not ctx.events.check_key(q.get('key', [''])[0]):
+                return self._json({'error': 'bad key'}, 403)
+            body = self._body()
+            try:
+                res = ctx.events.submit(str(body.get('space', '')), str(body.get('page_id', '')),
+                                        str(body.get('event', 'updated')))
+            except ValueError as e:
+                return self._json({'error': str(e)}, 400)
+            return self._json(res, 202)
+        if path == '/v1/retrieve':
+            body = self._body()
+            if not str(body.get('query', '')).strip():
+                return self._json({'error': 'query required'}, 400)
+            try:
+                top_k = min(int(body.get('top_k', 8)), 20)
+            except (ValueError, TypeError):
+                return self._json({'error': 'top_k must be int'}, 400)
+            filt = body.get('filter') or {}
+            try:
+                hits = ctx.ingest.retrieve(str(body['query']), top_k,
+                                           space=str(filt.get('space') or ''),
+                                           page_ids=[str(p) for p in filt.get('page_ids') or []])
+            except RuntimeError as e:  # misconfigured embedder/store
+                return self._json({'error': str(e)}, 503)
+            return self._json(hits)
         return self._json({'error': 'not found'}, 404)
 
 

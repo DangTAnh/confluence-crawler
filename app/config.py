@@ -31,8 +31,8 @@ class Settings:
     output: str = 'confluence_export'
     timeout: int = 30
     db_path: str = 'data/app.db'
-    interval_min: int = 15
-    scheduler_enabled: bool = True
+    event_key: str = ''  # shared secret for POST /v1/events (?key=); empty = accept all on LAN
+    event_workers: int = 2  # parallel single-page fetches from the event queue
     attachments: bool = False
     host: str = '127.0.0.1'
     port: int = 8000
@@ -51,8 +51,8 @@ class Settings:
             output=os.environ.get('CONFLUENCE_OUTPUT', 'confluence_export'),
             timeout=_int('CONFLUENCE_TIMEOUT', 30),
             db_path=os.environ.get('APP_DB', 'data/app.db'),
-            interval_min=_int('INTERVAL_MIN', 15),
-            scheduler_enabled=_bool('SCHEDULER_ENABLED', True),
+            event_key=os.environ.get('EVENT_KEY', ''),
+            event_workers=_int('EVENT_WORKERS', 2),
             attachments=_bool('CONFLUENCE_ATTACHMENTS', False),
             host=os.environ.get('APP_HOST', '127.0.0.1'),
             port=_int('APP_PORT', 8000),

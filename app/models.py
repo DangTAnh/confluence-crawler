@@ -8,7 +8,7 @@ from dataclasses import dataclass
 class SyncRun:
     id: int = 0
     space: str = ''
-    mode: str = 'full'  # full | since
+    mode: str = 'full'  # full | since | event
     status: str = 'queued'  # queued | running | done | failed | skipped
     fetched: int = 0
     written: int = 0
@@ -28,3 +28,6 @@ class PageState:
     path: str = ''
     updated_at: str = ''
     last_seen: str = ''
+    ingested_version: int = 0
+    chunk_count: int = 0
+    ingested_at: str = ''

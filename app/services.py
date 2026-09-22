@@ -2,7 +2,7 @@
 
 Sync runs the existing ``crawl_confluence.py`` worker in a daemon thread per
 space; progress lines update ``sync_runs`` live so the dashboard polls one row.
-# ponytail: overlapping manual+scheduled triggers for the same space record
+# ponytail: overlapping manual+event triggers for the same space record
 # 'skipped' instead of queueing (no lock table, running_run() is the guard).
 # ponytail: pages listed by walking metadata.json per request — O(n) disk scan,
 # fine to ~10k pages; add an FTS/cache table when search feels slow.
@@ -23,15 +23,16 @@ def _now() -> str:
 
 
 def iter_meta(output: str, space: str):
-    """Yield parsed metadata.json dicts under output/space (skips corrupt files)."""
-    root = os.path.join(output, space)
-    for dirpath, _, files in os.walk(root):
+    """Yield parsed metadata.json dicts (collected first: no open walk during rmtree)."""
+    found = []
+    for dirpath, _, files in os.walk(os.path.join(output, space)):
         if 'metadata.json' in files:
             try:
                 with open(os.path.join(dirpath, 'metadata.json'), encoding='utf-8') as f:
-                    yield json.load(f)
+                    found.append(json.load(f))
             except (OSError, ValueError):
                 continue
+    yield from found
 
 
 class SyncService:
@@ -118,9 +119,15 @@ class PagesService:
             if q and q not in title.casefold():
                 continue
             v = meta.get('version', {}) or {}
-            pages.append({'id': str(meta.get('id', '')), 'title': title,
+            pid = str(meta.get('id', ''))
+            st = self.db.get_page_state(space, pid)
+            iv = (st.ingested_version if st else 0) or 0
+            vn = int(v.get('number') or 0)
+            index = f'v{iv}/{st.chunk_count} chunks' if st and iv == vn and vn else (
+                f'stale (page v{vn}, indexed v{iv})' if st and iv else 'not indexed')
+            pages.append({'id': pid, 'title': title,
                           'version': v.get('number'), 'path': (meta.get('_export', {}) or {}).get('path', ''),
-                          'updated': v.get('when', '')})
+                          'updated': v.get('when', ''), 'index': index})
         pages.sort(key=lambda p: p['path'])
         return pages
 

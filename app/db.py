@@ -4,8 +4,8 @@ Tables:
   sync_runs   one row per space sync; dashboard + resume bookkeeping.
   page_states last seen version per page; drives update-vs-skip and delete detection.
   app_state   kv store; currently ``lastSync/<SPACE>`` for incremental polls.
-Threading: single shared connection + lock (writes come from request handlers,
-background syncs and the scheduler thread).
+Threading: single shared connection + lock (writes come from request handlers
+and background sync/event threads).
 """
 from __future__ import annotations
 
@@ -39,6 +39,9 @@ CREATE TABLE IF NOT EXISTS page_states (
   path TEXT NOT NULL DEFAULT '',
   updated_at TEXT NOT NULL DEFAULT '',
   last_seen TEXT NOT NULL DEFAULT '',
+  ingested_version INTEGER NOT NULL DEFAULT 0,
+  chunk_count INTEGER NOT NULL DEFAULT 0,
+  ingested_at TEXT NOT NULL DEFAULT '',
   PRIMARY KEY (space, page_id)
 );
 CREATE TABLE IF NOT EXISTS app_state (
@@ -46,6 +49,12 @@ CREATE TABLE IF NOT EXISTS app_state (
   value TEXT NOT NULL DEFAULT ''
 );
 """
+
+_MIGRATE_INDEX = (
+    'ALTER TABLE page_states ADD COLUMN ingested_version INTEGER NOT NULL DEFAULT 0',
+    'ALTER TABLE page_states ADD COLUMN chunk_count INTEGER NOT NULL DEFAULT 0',
+    "ALTER TABLE page_states ADD COLUMN ingested_at TEXT NOT NULL DEFAULT ''",
+)
 
 
 def _now() -> str:
@@ -61,6 +70,11 @@ class Database:
         self._db.row_factory = sqlite3.Row
         with self._lock, self._db:
             self._db.executescript(_DDL)
+            for stmt in _MIGRATE_INDEX:  # existing DBs pre-index: ADD COLUMN, ignore if present
+                try:
+                    self._db.execute(stmt)
+                except sqlite3.OperationalError:
+                    pass
     def close(self) -> None:
         """Release the sqlite file handle (required on Windows for cleanup)."""
         with self._lock:
@@ -116,12 +130,25 @@ class Database:
     def upsert_page(self, p: PageState) -> None:
         with self._lock, self._db as c:
             c.execute(
-                'INSERT INTO page_states(space, page_id, version, title, path, updated_at, last_seen)'
-                ' VALUES(?,?,?,?,?,?,?) ON CONFLICT(space, page_id) DO UPDATE SET'
+                'INSERT INTO page_states(space, page_id, version, title, path, updated_at, last_seen,'
+                ' ingested_version, chunk_count, ingested_at)'
+                ' VALUES(?,?,?,?,?,?,?,0,0,"") ON CONFLICT(space, page_id) DO UPDATE SET'
                 ' version=excluded.version, title=excluded.title, path=excluded.path,'
                 ' updated_at=excluded.updated_at, last_seen=excluded.last_seen',
                 (p.space, p.page_id, p.version, p.title, p.path, p.updated_at, _now()),
             )
+
+    def mark_ingested(self, space: str, page_id: str, version: int, chunks: int) -> None:
+        with self._lock, self._db as c:
+            c.execute(
+                'UPDATE page_states SET ingested_version=?, chunk_count=?, ingested_at=?'
+                ' WHERE space=? AND page_id=?', (version, chunks, _now(), space, page_id))
+
+    def get_page_state(self, space: str, page_id: str) -> PageState | None:
+        with self._lock:
+            row = self._db.execute(
+                'SELECT * FROM page_states WHERE space=? AND page_id=?', (space, page_id)).fetchone()
+        return PageState(**{k: row[k] for k in PageState.__dataclass_fields__ if k in row.keys()}) if row else None
 
     def count_pages(self, space: str) -> int:
         with self._lock:
